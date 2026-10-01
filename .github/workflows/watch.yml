@@ -2,9 +2,19 @@ name: 알림 봇
 
 on:
   schedule:
-    # 30분마다 실행. 더 자주/덜 자주 받고 싶으면 이 숫자만 바꾸세요.
-    #   매시간: "0 * * * *"   /   10분마다: "*/10 * * * *"
-    - cron: "*/30 * * * *"
+    # 30분마다(:09, :39) 실행합니다.
+    #
+    # ⚠️ 정각(:00)·반(:30)은 피하세요. GitHub 공식 문서:
+    #   "The schedule event can be delayed during periods of high loads...
+    #    High load times include the start of every hour."
+    #   "If the load is sufficiently high enough, some queued jobs may be dropped."
+    #   "To decrease the chance of delay, schedule your workflow to run at a
+    #    different time of the hour."
+    # 실제로 "*/30" (=:00,:30) 으로 뒀더니 예약 실행이 한 번도 안 떴습니다.
+    #
+    # 주기를 바꾸려면 분(앞 숫자)만 고치세요. 역시 정각은 피할 것:
+    #   매시간 1회: "9 * * * *"   /   15분마다: "4,19,34,49 * * * *"
+    - cron: "9,39 * * * *"
   workflow_dispatch:
     inputs:
       mode:
