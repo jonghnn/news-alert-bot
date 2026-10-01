@@ -14,6 +14,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from . import config as config_module
+from . import outbox
 from .config import Keywords
 from . import http, sources
 from .errors import SkipSource
@@ -79,13 +80,18 @@ def main(argv: list[str] | None = None) -> int:
     state.prune({source.key for source in cfg.sources})
     silent = _in_quiet_hours(cfg.quiet_hours, tz)
 
+    # 루틴이 써 둔 요약 브리핑을 먼저 내보낸다.
     sent_total = 0
     failed: list[str] = []
+    try:
+        sent_total += outbox.flush(telegram, args.state, silent)
+    except Exception as error:
+        log.error("브리핑 전송 실패: %s", error)
 
     try:
         for source in cfg.sources:
             try:
-                sent_total += _process(source, cfg, telegram, session, state, tz, silent)
+                sent_total += _process(source, cfg, telegram, session, state, tz, silent, args.state)
                 state.set_meta(source.key, "failures", 0)
             except SkipSource as reason:
                 # 설정이 덜 된 것은 고장이 아니므로 실패로 세지 않는다.
@@ -97,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         # 전송 도중 중단되더라도 이미 보낸 건 다시 안 가도록 반드시 저장한다.
         state.save()
+        outbox.prune_log(args.state)
 
     log.info("완료: %d건 전송, 소스 %d개 중 %d개 실패", sent_total, len(cfg.sources), len(failed))
     if failed:
@@ -105,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if len(failed) == len(cfg.sources) else 0
 
 
-def _process(source, cfg, telegram, session, state, tz, silent) -> int:
+def _process(source, cfg, telegram, session, state, tz, silent, state_path) -> int:
     entries = sources.fetch(source, session, state)
     log.info("[%s] %d건 수집", source.name, len(entries))
 
@@ -147,6 +154,7 @@ def _process(source, cfg, telegram, session, state, tz, silent) -> int:
     for entry in fresh:
         telegram.send_entry(source.name, source.type, entry, tz, silent)
         _remember(state, source.key, entry)
+        outbox.log_sent(state_path, source.name, source.type, entry)
         log.info("[%s] 전송: %s", source.name, entry.title[:60])
 
     return len(fresh)

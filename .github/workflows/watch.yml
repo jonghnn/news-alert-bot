@@ -68,7 +68,9 @@ jobs:
       - name: 본 글 기록 저장
         if: ${{ always() && inputs.mode != 'chatid' && inputs.dry_run != true }}
         run: |
-          if git diff --quiet -- state/; then
+          # git diff 는 '추적되지 않는 새 파일'을 못 본다. sent-log.jsonl 이 처음
+          # 생겼을 때 "변경 없음" 으로 판단해 영영 커밋되지 않는다. status 를 쓴다.
+          if [ -z "$(git status --porcelain state/)" ]; then
             echo "변경 없음"
             exit 0
           fi
