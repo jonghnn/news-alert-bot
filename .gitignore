@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Claude Code 로컬 권한 설정 (공개 저장소에 올릴 필요 없음)
+.claude/settings.local.json

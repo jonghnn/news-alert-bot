@@ -1,0 +1,6 @@
+feedparser==6.0.11
+requests==2.32.3
+PyYAML==6.0.2
+beautifulsoup4==4.12.3
+# 윈도우에는 시간대 데이터베이스가 없어서 Asia/Seoul 을 못 찾는다.
+tzdata==2024.1
