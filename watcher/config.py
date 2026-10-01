@@ -84,13 +84,30 @@ def _parse_quiet_hours(raw: Any) -> tuple[int, int] | None:
     return start, end
 
 
+FILTER_MODES = {
+    True: "full",       # include + exclude
+    False: "off",       # 필터 없음 — 전부 통과
+    "full": "full",
+    "exclude": "exclude",  # 소거법: 제외어만 본다. include 는 무시
+    "off": "off",
+}
+
+
 def _filter_mode(item: dict, stype: str) -> str:
-    """이 소스에 전역 키워드를 어디까지 적용할지 정한다."""
+    """이 소스에 전역 키워드를 어디까지 적용할지 정한다.
+
+    filter: true     → include + exclude  (내가 적은 단어만 통과 = 찾기)
+    filter: exclude  → exclude 만          (걸리는 것만 버림 = 소거법)
+    filter: false    → 필터 없음
+    """
     raw = item.get("filter")
-    if raw is False:
-        return "off"
-    if raw is True:
-        return "full"
+    if raw is not None:
+        mode = FILTER_MODES.get(raw if isinstance(raw, bool) else str(raw).lower())
+        if mode is None:
+            raise ConfigError(
+                f"filter 는 true / false / exclude 중 하나여야 합니다 (현재: {raw})."
+            )
+        return mode
     if "keywords" in item:
         # 소스가 자기 키워드를 직접 적었다면 그건 쓰라는 뜻이다.
         return "full"
