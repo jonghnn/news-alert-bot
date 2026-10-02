@@ -88,10 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as error:
         log.error("브리핑 전송 실패: %s", error)
 
+    # 소스별로 바로 보내지 않고 모았다가 한 번에 보낸다 (묶음 전송).
+    pending: list[tuple] = []
     try:
         for source in cfg.sources:
             try:
-                sent_total += _process(source, cfg, telegram, session, state, tz, silent, args.state)
+                pending += [(source, entry) for entry in _collect(source, cfg, session, state)]
                 state.set_meta(source.key, "failures", 0)
             except SkipSource as reason:
                 # 설정이 덜 된 것은 고장이 아니므로 실패로 세지 않는다.
@@ -100,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
                 failed.append(source.name)
                 log.error("[%s] 실패: %s", source.name, error)
                 _maybe_alert(source, telegram, state, error)
+
+        if pending:
+            sent_total += _deliver(pending, cfg, telegram, state, tz, silent, args.state)
     finally:
         # 전송 도중 중단되더라도 이미 보낸 건 다시 안 가도록 반드시 저장한다.
         state.save()
@@ -112,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if len(failed) == len(cfg.sources) else 0
 
 
-def _process(source, cfg, telegram, session, state, tz, silent, state_path) -> int:
+def _collect(source, cfg, session, state) -> list:
+    """이 소스에서 보낼 글을 고른다. 전송은 하지 않는다 (_deliver 가 한다)."""
     entries = sources.fetch(source, session, state)
     log.info("[%s] %d건 수집", source.name, len(entries))
 
@@ -141,7 +147,7 @@ def _process(source, cfg, telegram, session, state, tz, silent, state_path) -> i
             _remember(state, source.key, entry)
         state.mark_initialized(source.key)
         log.info("[%s] 첫 등록 — 기존 글 %d건은 건너뜁니다. 다음 글부터 알림이 갑니다.", source.name, len(entries))
-        return 0
+        return []
 
     # 오래된 글부터 보내야 알림이 시간 순서대로 도착한다.
     fresh.sort(key=lambda e: e.published or datetime.min.replace(tzinfo=timezone.utc))
@@ -151,13 +157,30 @@ def _process(source, cfg, telegram, session, state, tz, silent, state_path) -> i
         log.info("[%s] %d건은 다음 실행으로 미룹니다 (소스당 최대 %d건)", source.name, skipped, source.max_items)
         fresh = fresh[: source.max_items]
 
-    for entry in fresh:
+    return fresh
+
+
+def _deliver(pending, cfg, telegram, state, tz, silent, state_path) -> int:
+    """모아둔 글을 보낸다.
+
+    digest 가 켜져 있으면 소스별로 묶어 한 메시지로 보낸다. 30건이 30개의
+    알림으로 쏟아지는 걸 막는다. 꺼져 있으면 예전처럼 한 건씩 보낸다.
+    """
+    if cfg.digest:
+        # 묶음은 통째로 성공해야 기록한다. 실패하면 다음 실행에서 다시 보낸다.
+        count = telegram.send_digest(pending, tz, silent)
+        for source, entry in pending:
+            _remember(state, source.key, entry)
+            outbox.log_sent(state_path, source.name, source.type, entry)
+        log.info("묶음 %d개 메시지로 %d건 전송", count, len(pending))
+        return len(pending)
+
+    for source, entry in pending:
         telegram.send_entry(source.name, source.type, entry, tz, silent)
         _remember(state, source.key, entry)
         outbox.log_sent(state_path, source.name, source.type, entry)
         log.info("[%s] 전송: %s", source.name, entry.title[:60])
-
-    return len(fresh)
+    return len(pending)
 
 
 def _remember(state, source_key: str, entry) -> None:

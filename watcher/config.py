@@ -64,6 +64,7 @@ class Config:
     sources: list[Source]
     timezone: str
     quiet_hours: tuple[int, int] | None
+    digest: bool  # True 면 한 실행의 글을 한 메시지로 묶어 보낸다
 
 
 def _slug(name: str) -> str:
@@ -186,4 +187,5 @@ def load(path: str | Path) -> Config:
         sources=sources,
         timezone=str(telegram.get("timezone", "Asia/Seoul")),
         quiet_hours=_parse_quiet_hours(telegram.get("quiet_hours")),
+        digest=bool(telegram.get("digest", True)),
     )

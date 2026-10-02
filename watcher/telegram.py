@@ -61,6 +61,36 @@ class Telegram:
     def send_entry(self, source_name: str, source_type: str, entry: Entry, tz, silent: bool) -> None:
         self.send(_format(source_name, source_type, entry, tz), silent=silent)
 
+    def send_digest(self, pending, tz, silent: bool) -> int:
+        """한 실행에서 모은 글을 소스별로 묶어 한 메시지로 보낸다.
+
+        30건이 30개의 알림으로 오는 걸 막는다. 길면 여러 메시지로 나눈다.
+        """
+        grouped: dict[tuple[str, str], list] = {}
+        for source, entry in pending:
+            grouped.setdefault((source.name, source.type), []).append(entry)
+
+        total = sum(len(v) for v in grouped.values())
+        blocks = [[f"📬 <b>새 소식 {total}건</b>"]]
+        for (name, stype), entries in grouped.items():
+            blocks.append(_digest_lines(name, stype, entries, tz))
+
+        # 텔레그램 상한에 맞춰 덩어리를 나눈다. 블록 중간은 자르지 않는다.
+        messages: list[str] = []
+        buf: list[str] = []
+        for block in blocks:
+            chunk = "\n".join(block)
+            if buf and len("\n\n".join(buf)) + len(chunk) + 2 > MAX_LEN - 200:
+                messages.append("\n\n".join(buf))
+                buf = []
+            buf.append(chunk)
+        if buf:
+            messages.append("\n\n".join(buf))
+
+        for text in messages:
+            self.send(text, silent=silent)
+        return len(messages)
+
     def get_updates(self) -> list[dict]:
         return self._call("getUpdates", {"timeout": 0})
 
@@ -85,6 +115,15 @@ def _format(source_name: str, source_type: str, entry: Entry, tz) -> str:
         lines.append(_stamp(entry.published, tz))
 
     return "\n".join(lines)
+
+
+def _digest_lines(source_name: str, source_type: str, entries, tz) -> list[str]:
+    icon = ICONS.get(source_type, "🔔")
+    lines = [f"{icon} <b>{_text(source_name)}</b> ({len(entries)})"]
+    for e in entries:
+        badge = f" {_text(e.badge.split()[0])}" if e.badge else ""
+        lines.append(f'· <a href="{html.escape(e.link, quote=True)}">{_text(e.title)}</a>{badge}')
+    return lines
 
 
 def _text(value: str) -> str:
