@@ -10,15 +10,26 @@ Claude 루틴은 텔레그램 토큰을 갖고 있지 않다(일부러 주지 �
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from .telegram import TelegramError
 
 log = logging.getLogger(__name__)
 
 LOG_RETENTION_DAYS = 7
 MAX_MESSAGE_CHARS = 3500   # 텔레그램 상한(4096)보다 여유 있게
+
+# 텔레그램이 HTML parse_mode 에서 받아주는 태그. 그 밖의 태그는 메시지 전체를
+# 거부당하게 만든다 (실측: `</content>` 하나로 큐가 11일 막혔다).
+ALLOWED_TAGS = {
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "a", "code", "pre", "blockquote", "span", "tg-spoiler", "tg-emoji",
+}
 
 
 def log_sent(state_path: str | Path, source_name: str, source_type: str, entry) -> None:
@@ -79,13 +90,52 @@ def flush(telegram, state_path: str | Path, silent: bool) -> int:
             _discard(item, telegram)
             continue
 
-        telegram.send(text[:MAX_MESSAGE_CHARS], silent=silent)
+        # 한 건이 실패해도 나머지는 계속 보낸다. 예전에는 맨 앞 파일 하나가
+        # 깨지면 뒤의 29건이 11일 동안 한 번도 시도되지 않았다.
+        try:
+            telegram.send(_sanitize(text)[:MAX_MESSAGE_CHARS], silent=silent)
+        except TelegramError as error:
+            log.warning("브리핑 전송 실패, 태그를 떼고 재시도합니다 %s: %s", item.name, error)
+            try:
+                telegram.send(_strip_tags(text)[:MAX_MESSAGE_CHARS], silent=silent)
+            except TelegramError as retry_error:
+                log.error("브리핑을 보내지 못했습니다 %s: %s", item.name, retry_error)
+                _quarantine(item, telegram)  # 큐를 막지 않도록 옆으로 치운다
+                continue
+
         # 보낸 뒤에만 지운다. 전송이 실패하면 파일이 남아 다음 실행에서 재시도된다.
         _discard(item, telegram)
         sent += 1
         log.info("브리핑 전송: %s", item.name)
 
+    # 밀린 게 남아 있으면 눈에 띄게 남긴다. 조용히 쌓이면 11일도 모른다.
+    stuck = len(list(box.glob("*.md")))
+    if stuck:
+        log.warning("outbox 에 %d건이 아직 남아 있습니다", stuck)
+    failed = len(list(box.glob("*.failed")))
+    if failed:
+        log.warning("전송 실패로 치워둔 브리핑이 %d건 있습니다 (state/outbox/*.failed)", failed)
+
     return sent
+
+
+def _sanitize(text: str) -> str:
+    """텔레그램이 모르는 태그를 지운다.
+
+    브리핑은 Claude 루틴이 쓰므로 가끔 허용되지 않는 태그가 섞인다. 실제로
+    `</content>` 하나 때문에 큐 전체가 11일간 막힌 적이 있다. 내용은 남기고
+    태그만 걷어낸다.
+    """
+    return re.sub(
+        r"</?([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>",
+        lambda m: m.group(0) if m.group(1).lower() in ALLOWED_TAGS else "",
+        text,
+    )
+
+
+def _strip_tags(text: str) -> str:
+    """최후의 수단. 태그를 전부 떼고 평문으로 보낸다."""
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
 
 
 def _discard(item: Path, telegram) -> None:
@@ -94,3 +144,16 @@ def _discard(item: Path, telegram) -> None:
         log.info("[지우지 않음] %s (dry-run)", item.name)
         return
     item.unlink(missing_ok=True)
+
+
+def _quarantine(item: Path, telegram) -> None:
+    """두 번 실패한 브리핑은 .failed 로 이름을 바꿔 큐에서 빼낸다.
+
+    지우지 않는 이유: 왜 실패했는지 나중에 볼 수 있어야 한다.
+    """
+    if getattr(telegram, "dry_run", False):
+        return
+    try:
+        item.rename(item.with_suffix(".failed"))
+    except OSError as error:
+        log.error("실패한 브리핑을 치우지 못했습니다 %s: %s", item.name, error)
