@@ -3,7 +3,7 @@
     "issue:경제-이슈": {
       "initialized": true,
       "meta": {
-        "failures": 0,
+        "failures": 1,
         "issues": {
           "i:007fea82b2de4b45": {
             "last_seen": "2026-10-11T02:55:08+00:00",
@@ -11219,7 +11219,7 @@
     "issue:기술-이슈": {
       "initialized": true,
       "meta": {
-        "failures": 0,
+        "failures": 1,
         "issues": {
           "i:00181bf382f4adce": {
             "last_seen": "2026-10-15T18:36:20+00:00",
@@ -17086,7 +17086,7 @@
     "issue:세계-이슈": {
       "initialized": true,
       "meta": {
-        "failures": 0,
+        "failures": 1,
         "issues": {
           "i:0058579ed8a6c9c3": {
             "last_seen": "2026-10-13T16:08:11+00:00",
@@ -21061,7 +21061,7 @@
     "news:ai-뉴스": {
       "initialized": true,
       "meta": {
-        "failures": 0
+        "failures": 1
       },
       "seen": {
         "000f491829c6fbe6": "2026-10-02T18:44:32+00:00",
@@ -22133,7 +22133,7 @@
     "news:코인-뉴스": {
       "initialized": true,
       "meta": {
-        "failures": 0
+        "failures": 1
       },
       "seen": {
         "015c92dc415d2300": "2026-10-17T05:04:06+00:00",
