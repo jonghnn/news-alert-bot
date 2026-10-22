@@ -48,6 +48,13 @@ class State:
     def set_meta(self, source_key: str, field: str, value: Any) -> None:
         self._bucket(source_key).setdefault("meta", {})[field] = value
 
+    def get_global(self, field: str) -> Any:
+        """소스와 무관한 기록. 마지막 전송 시각처럼 실행 전체에 하나뿐인 값."""
+        return self._data.setdefault("meta", {}).get(field)
+
+    def set_global(self, field: str, value: Any) -> None:
+        self._data.setdefault("meta", {})[field] = value
+
     def prune(self, active_keys: set[str]) -> None:
         """설정에서 빠진 소스와 오래된 기록을 정리한다."""
         for key in list(self._data["sources"]):

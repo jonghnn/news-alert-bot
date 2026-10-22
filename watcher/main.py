@@ -11,7 +11,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as clock, timedelta, timezone
 
 from . import config as config_module
 from . import outbox
@@ -77,6 +77,17 @@ def main(argv: list[str] | None = None) -> int:
 
     tz = _timezone(cfg.timezone)
     state = State(args.state)
+
+    # 전송 시각이 아니면 수집조차 하지 않는다. 수집만 하고 안 보내면 이슈 전개
+    # 기록이 갱신되면서 '무엇이 새로 붙었는지' 가 영구히 사라진다.
+    if not args.now and _delivery_slot(cfg.delivery_times, tz, state) is None:
+        log.info(
+            "지금은 전송 시각이 아닙니다. 다음 전송 예정: %s (설정: %s)",
+            _next_slot_text(cfg.delivery_times, tz),
+            ", ".join(f"{h:02d}:{m:02d}" for h, m in cfg.delivery_times),
+        )
+        return 0
+
     state.prune({source.key for source in cfg.sources})
     silent = _in_quiet_hours(cfg.quiet_hours, tz)
 
@@ -103,9 +114,16 @@ def main(argv: list[str] | None = None) -> int:
                 log.error("[%s] 실패: %s", source.name, error)
                 _maybe_alert(source, telegram, state, error)
 
+        if pending and cfg.max_per_delivery:
+            pending, dropped = _trim(pending, cfg.max_per_delivery, state)
+            if dropped:
+                log.info("전체 상한을 넘겨 %d건을 버립니다 (한 번에 최대 %d건)", dropped, cfg.max_per_delivery)
+
         if pending:
             sent_total += _deliver(pending, cfg, telegram, state, tz, silent, args.state)
     finally:
+        # 이번 차례를 썼다고 기록한다. 안 그러면 다음 예약 시각까지 매 실행이 또 보낸다.
+        state.set_global("last_delivery", datetime.now(timezone.utc).isoformat(timespec="seconds"))
         # 전송 도중 중단되더라도 이미 보낸 건 다시 안 가도록 반드시 저장한다.
         state.save()
         outbox.prune_log(args.state)
@@ -149,15 +167,111 @@ def _collect(source, cfg, session, state) -> list:
         log.info("[%s] 첫 등록 — 기존 글 %d건은 건너뜁니다. 다음 글부터 알림이 갑니다.", source.name, len(entries))
         return []
 
-    # 오래된 글부터 보내야 알림이 시간 순서대로 도착한다.
-    fresh.sort(key=lambda e: e.published or datetime.min.replace(tzinfo=timezone.utc))
-
-    skipped = len(fresh) - source.max_items
-    if skipped > 0:
-        log.info("[%s] %d건은 다음 실행으로 미룹니다 (소스당 최대 %d건)", source.name, skipped, source.max_items)
+    # 넘치는 건 '미루지' 않고 버린다.
+    #
+    # 예전에는 상한을 넘으면 다음 실행으로 미뤘다. 그런데 공급이 상한보다 10배
+    # 많아서(실측: 한 실행에 통과 260건 / 전송 28건 / 적체 208건) 큐가 영구히
+    # 가득 찬 상태가 됐다. 그래서 간격이 2시간이든 7시간이든 매번 28건이 나갔고,
+    # 새벽 3시에 오는 것도 '새벽 뉴스' 가 아니라 몇 시간 전 기사였다.
+    # 최신을 남기고 나머지는 본 것으로 기록해 다시 오지 않게 한다.
+    fresh.sort(key=_when, reverse=True)
+    if len(fresh) > source.max_items:
+        for entry in fresh[source.max_items:]:
+            _remember(state, source.key, entry)
+        log.info(
+            "[%s] %d건은 버립니다 (소스당 최대 %d건, 최신 우선)",
+            source.name, len(fresh) - source.max_items, source.max_items,
+        )
         fresh = fresh[: source.max_items]
 
+    # 보낼 때는 오래된 순이어야 알림이 시간 순서대로 도착한다.
+    fresh.sort(key=_when)
     return fresh
+
+
+def _when(entry) -> datetime:
+    """정렬용 시각. 날짜가 없는 글은 가장 오래된 것으로 취급한다."""
+    return entry.published or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _trim(pending, cap: int, state) -> tuple[list, int]:
+    """전체 상한에 맞춘다.
+
+    소스를 번갈아 돌며 최신부터 한 건씩 뽑는다. 그냥 전체를 최신순으로 자르면
+    글이 많은 소스(코인 뉴스는 한 번에 100건)가 상한을 전부 차지해서 경제 이슈가
+    한 건도 안 올 수 있다.
+    """
+    by_source: dict[str, list] = {}
+    for source, entry in pending:
+        by_source.setdefault(source.key, []).append((source, entry))
+    for rows in by_source.values():
+        rows.sort(key=lambda pair: _when(pair[1]), reverse=True)
+
+    keep: list = []
+    while len(keep) < cap:
+        took = False
+        for rows in by_source.values():
+            if not rows:
+                continue
+            keep.append(rows.pop(0))
+            took = True
+            if len(keep) >= cap:
+                break
+        if not took:
+            break
+
+    dropped = [pair for rows in by_source.values() for pair in rows]
+    for source, entry in dropped:
+        _remember(state, source.key, entry)
+
+    keep.sort(key=lambda pair: _when(pair[1]))
+    return keep, len(dropped)
+
+
+def _delivery_slot(times, tz, state) -> datetime | None:
+    """지금이 보낼 차례인지 본다. 차례면 그 예약 시각을 돌려준다.
+
+    '08:30 에 보낸다' 가 아니라 '08:30 이 지난 뒤 첫 실행에서 보낸다' 다.
+    GitHub 이 08:30 실행을 버려도(실측 96회/일 중 6.5회만 실행) 다음 실행이
+    대신 보내므로 하루 전송 횟수가 보장된다.
+    """
+    if not times:
+        return datetime.now(tz)  # 설정이 없으면 예전처럼 매 실행 전송
+
+    now = datetime.now(tz)
+    passed = [
+        slot
+        for day in (0, 1)
+        for h, m in times
+        for slot in [datetime.combine(now.date() - timedelta(days=day), clock(h, m), tzinfo=tz)]
+        if slot <= now
+    ]
+    if not passed:
+        return None
+    latest = max(passed)
+
+    last = state.get_global("last_delivery")
+    if last:
+        try:
+            if datetime.fromisoformat(last).astimezone(tz) >= latest:
+                return None
+        except ValueError:
+            pass  # 기록이 깨졌으면 보낸다. 빠뜨리는 쪽이 더 나쁘다.
+    return latest
+
+
+def _next_slot_text(times, tz) -> str:
+    if not times:
+        return "매 실행"
+    now = datetime.now(tz)
+    upcoming = [
+        slot
+        for day in (0, 1)
+        for h, m in times
+        for slot in [datetime.combine(now.date() + timedelta(days=day), clock(h, m), tzinfo=tz)]
+        if slot > now
+    ]
+    return min(upcoming).strftime("%m/%d %H:%M")
 
 
 def _deliver(pending, cfg, telegram, state, tz, silent, state_path) -> int:
@@ -257,6 +371,7 @@ def _parse_args(argv):
     parser.add_argument("--state", default="state/seen.json")
     parser.add_argument("--mode", choices=["run", "test", "chatid"], default="run")
     parser.add_argument("--dry-run", action="store_true", help="실제 전송 없이 결과만 로그로 출력")
+    parser.add_argument("--now", action="store_true", help="전송 시각을 무시하고 지금 보낸다 (수동 실행용)")
     return parser.parse_args(argv)
 
 

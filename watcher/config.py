@@ -65,6 +65,8 @@ class Config:
     timezone: str
     quiet_hours: tuple[int, int] | None
     digest: bool  # True 면 한 실행의 글을 한 메시지로 묶어 보낸다
+    delivery_times: list[tuple[int, int]]  # 이 시각이 지난 뒤 첫 실행에서만 보낸다. 비우면 매 실행 전송
+    max_per_delivery: int  # 한 번에 보낼 최대 건수. 넘치면 최신만 남기고 버린다 (0 = 무제한)
 
 
 def _slug(name: str) -> str:
@@ -83,6 +85,32 @@ def _parse_quiet_hours(raw: Any) -> tuple[int, int] | None:
     if not (0 <= start <= 23 and 0 <= end <= 23):
         raise ConfigError("telegram.quiet_hours 의 시(hour)는 0~23 이어야 합니다.")
     return start, end
+
+
+def _parse_delivery_times(raw: Any) -> list[tuple[int, int]]:
+    """전송 시각 목록. ["08:30", "19:00"] 형식.
+
+    GitHub 이 예약 실행의 90% 이상을 버리기 때문에(실측 96회/일 → 6.5회/일) 실행
+    시각은 통제할 수 없다. 대신 '언제 보낼지' 를 여기서 정하고, 그 시각이 지난 뒤
+    첫 실행에서만 보낸다. 나머지 실행은 아무것도 하지 않는다.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise ConfigError('telegram.delivery_times 는 ["08:30", "19:00"] 형식이어야 합니다.')
+
+    times: list[tuple[int, int]] = []
+    for value in raw:
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(value))
+        if not match:
+            raise ConfigError(f'telegram.delivery_times 의 "{value}" 는 "08:30" 형식이어야 합니다.')
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ConfigError(f'telegram.delivery_times 의 "{value}" 가 시각 범위를 벗어났습니다.')
+        times.append((hour, minute))
+    return sorted(set(times))
 
 
 FILTER_MODES = {
@@ -188,4 +216,6 @@ def load(path: str | Path) -> Config:
         timezone=str(telegram.get("timezone", "Asia/Seoul")),
         quiet_hours=_parse_quiet_hours(telegram.get("quiet_hours")),
         digest=bool(telegram.get("digest", True)),
+        delivery_times=_parse_delivery_times(telegram.get("delivery_times")),
+        max_per_delivery=max(0, int(telegram.get("max_per_delivery", 0))),
     )
