@@ -18,6 +18,7 @@ class Entry:
     badge: str = ""                                   # 소스명 뒤에 붙는 표시 (예: "🔄 전개")
     detail_lines: list[str] = field(default_factory=list)  # 요약 대신 보여줄 줄들
     dedup_by_title: bool = True                       # 같은 제목이 반복돼야 하는 경우 False
+    topic: str = ""                                   # relevance 가 분류한 주제 (메시지 묶기용)
 
     def __post_init__(self) -> None:
         # 피드가 guid를 안 주면 링크로, 링크도 없으면 제목으로 식별한다.

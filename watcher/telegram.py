@@ -61,19 +61,35 @@ class Telegram:
     def send_entry(self, source_name: str, source_type: str, entry: Entry, tz, silent: bool) -> None:
         self.send(_format(source_name, source_type, entry, tz), silent=silent)
 
-    def send_digest(self, pending, tz, silent: bool) -> int:
-        """한 실행에서 모은 글을 소스별로 묶어 한 메시지로 보낸다.
+    def send_digest(self, pending, tz, silent: bool, by_topic: bool = False) -> int:
+        """한 실행에서 모은 글을 묶어 한 메시지로 보낸다.
 
         30건이 30개의 알림으로 오는 걸 막는다. 길면 여러 메시지로 나눈다.
+
+        by_topic 이면 소스 대신 주제(AI·반도체 / 주식·거시 / 코인)로 묶는다.
+        소스 이름은 내가 설정한 수집 경로일 뿐이어서, 같은 반도체 기사가 'AI 뉴스'
+        와 '기술 이슈' 로 흩어져 보였다. 읽는 쪽에서 의미가 있는 묶음은 주제다.
         """
+        total = len(pending)
+        blocks = [[f"📬 <b>새 소식 {total}건</b>"]]
+
+        if by_topic:
+            grouped_topic: dict[str, list] = {}
+            for source, entry in pending:
+                grouped_topic.setdefault(entry.topic or "기타", []).append((source, entry))
+            # pending 은 이미 주제 순서로 정렬돼 있다 (relevance.select).
+            for name, rows in grouped_topic.items():
+                blocks.append(_topic_lines(name, rows))
+            return self._send_blocks(blocks, silent)
+
         grouped: dict[tuple[str, str], list] = {}
         for source, entry in pending:
             grouped.setdefault((source.name, source.type), []).append(entry)
-
-        total = sum(len(v) for v in grouped.values())
-        blocks = [[f"📬 <b>새 소식 {total}건</b>"]]
         for (name, stype), entries in grouped.items():
             blocks.append(_digest_lines(name, stype, entries, tz))
+        return self._send_blocks(blocks, silent)
+
+    def _send_blocks(self, blocks, silent: bool) -> int:
 
         # 텔레그램 상한에 맞춰 덩어리를 나눈다. 블록 중간은 자르지 않는다.
         messages: list[str] = []
@@ -115,6 +131,20 @@ def _format(source_name: str, source_type: str, entry: Entry, tz) -> str:
         lines.append(_stamp(entry.published, tz))
 
     return "\n".join(lines)
+
+
+TOPIC_ICONS = {"AI·반도체": "🤖", "주식·거시": "📈", "코인": "🪙", "기타": "🔔"}
+
+
+def _topic_lines(topic_name: str, rows) -> list[str]:
+    """주제 묶음 한 덩어리. 줄 끝에 소스를 작게 붙여 어디서 왔는지는 남긴다."""
+    icon = TOPIC_ICONS.get(topic_name, "🔔")
+    lines = [f"{icon} <b>{_text(topic_name)}</b> ({len(rows)})"]
+    for source, entry in rows:
+        badge = f" {_text(entry.badge.split()[0])}" if entry.badge else ""
+        link = f'<a href="{html.escape(entry.link, quote=True)}">{_text(entry.title)}</a>'
+        lines.append(f"· {link}{badge} <i>{_text(source.name)}</i>")
+    return lines
 
 
 def _digest_lines(source_name: str, source_type: str, entries, tz) -> list[str]:

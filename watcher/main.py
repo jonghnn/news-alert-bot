@@ -15,6 +15,7 @@ from datetime import datetime, time as clock, timedelta, timezone
 
 from . import config as config_module
 from . import outbox
+from . import relevance
 from .config import Keywords
 from . import http, sources
 from .errors import SkipSource
@@ -114,7 +115,18 @@ def main(argv: list[str] | None = None) -> int:
                 log.error("[%s] 실패: %s", source.name, error)
                 _maybe_alert(source, telegram, state, error)
 
-        if pending and cfg.max_per_delivery:
+        if pending and cfg.relevance:
+            before = len(pending)
+            pending, dropped, by_topic = relevance.select(pending, cfg)
+            for source, entry in dropped:
+                _remember(state, source.key, entry)
+            log.info(
+                "관련성 점수로 %d건 중 %d건을 골랐습니다 (%d점 미만·중복·할당 초과 %d건 버림)",
+                before, len(pending), cfg.relevance_min_score, len(dropped),
+            )
+            if by_topic:
+                log.info("주제별: %s", ", ".join(f"{k} {v}건" for k, v in by_topic.items()))
+        elif pending and cfg.max_per_delivery:
             pending, dropped = _trim(pending, cfg.max_per_delivery, state)
             if dropped:
                 log.info("전체 상한을 넘겨 %d건을 버립니다 (한 번에 최대 %d건)", dropped, cfg.max_per_delivery)
@@ -166,6 +178,17 @@ def _collect(source, cfg, session, state) -> list:
         state.mark_initialized(source.key)
         log.info("[%s] 첫 등록 — 기존 글 %d건은 건너뜁니다. 다음 글부터 알림이 갑니다.", source.name, len(entries))
         return []
+
+    # 관련성 점수를 쓸 때는 여기서 자르지 않는다.
+    #
+    # ⚠️ 여기서 '최신순 N건' 으로 먼저 자르면 점수 심사가 무의미해진다. 실측:
+    #    386건을 모았는데 이 단계에서 33건만 남아 그 33건 중 17건을 골랐다.
+    #    없애려던 '최신순 선택' 이 앞단에 그대로 남아 있었던 셈이고, 점수가 높은
+    #    기사가 _remember() 로 영구히 버려졌다.
+    #    소스당 상한은 점수를 본 뒤에 relevance.max_per_source 가 적용한다.
+    if cfg.relevance:
+        fresh.sort(key=_when)
+        return fresh
 
     # 넘치는 건 '미루지' 않고 버린다.
     #
@@ -282,7 +305,7 @@ def _deliver(pending, cfg, telegram, state, tz, silent, state_path) -> int:
     """
     if cfg.digest:
         # 묶음은 통째로 성공해야 기록한다. 실패하면 다음 실행에서 다시 보낸다.
-        count = telegram.send_digest(pending, tz, silent)
+        count = telegram.send_digest(pending, tz, silent, by_topic=cfg.group_by_topic and cfg.relevance)
         for source, entry in pending:
             _remember(state, source.key, entry)
             outbox.log_sent(state_path, source.name, source.type, entry)

@@ -67,6 +67,15 @@ class Config:
     digest: bool  # True 면 한 실행의 글을 한 메시지로 묶어 보낸다
     delivery_times: list[tuple[int, int]]  # 이 시각이 지난 뒤 첫 실행에서만 보낸다. 비우면 매 실행 전송
     max_per_delivery: int  # 한 번에 보낼 최대 건수. 넘치면 최신만 남기고 버린다 (0 = 무제한)
+    # ── 관련성 점수 (relevance.py) ──
+    relevance: bool                      # False 면 예전처럼 '최신순' 으로 고른다
+    relevance_min_score: int             # 이 점수 미만은 아예 안 보낸다
+    relevance_quotas: dict[str, int]     # 주제별 최대 건수 (한 주제 쏠림 방지)
+    relevance_max_per_source: int        # 소스당 최대 건수 (0 = 제한 없음)
+    relevance_similar: float             # 제목 단어 겹침이 이 비율 이상이면 같은 기사로 본다
+    relevance_add: list[str]             # 점수를 올릴 단어 (+4)
+    relevance_penalize: list[str]        # 점수를 내릴 단어 (-5)
+    group_by_topic: bool                 # 메시지를 소스별 대신 주제별로 묶는다
 
 
 def _slug(name: str) -> str:
@@ -111,6 +120,32 @@ def _parse_delivery_times(raw: Any) -> list[tuple[int, int]]:
             raise ConfigError(f'telegram.delivery_times 의 "{value}" 가 시각 범위를 벗어났습니다.')
         times.append((hour, minute))
     return sorted(set(times))
+
+
+def _parse_quotas(raw: Any) -> dict[str, int]:
+    """주제별 할당. 비우면 relevance.py 의 기본값을 쓴다.
+
+    왜 필요한가 (실측 2026-10-26): 점수순으로만 20건을 뽑으면 코인 기사가 7건을
+    차지했고 그중 3건이 "오늘 코인 하락" 을 다른 말로 반복했다. 코인 시세 기사는
+    자극적인 단어(급락·청산·폭락)가 많아 점수가 구조적으로 높다.
+    """
+    from .relevance import TOPIC_AI, TOPIC_COIN, TOPIC_MARKET, TOPIC_OTHER
+
+    default = {TOPIC_AI: 7, TOPIC_MARKET: 7, TOPIC_COIN: 5, TOPIC_OTHER: 1}
+    if not raw:
+        return default
+    if not isinstance(raw, dict):
+        raise ConfigError("relevance.quotas 는 '주제: 건수' 항목이어야 합니다.")
+    known = set(default)
+    quotas = dict(default)
+    for key, value in raw.items():
+        name = str(key).strip()
+        if name not in known:
+            raise ConfigError(
+                f"relevance.quotas 의 '{name}' 은 모르는 주제입니다 (가능: {', '.join(sorted(known))})."
+            )
+        quotas[name] = max(0, int(value))
+    return quotas
 
 
 FILTER_MODES = {
@@ -158,6 +193,11 @@ def load(path: str | Path) -> Config:
     default_max_age = int(defaults.get("max_age_days", 7))
 
     telegram = raw.get("telegram") or {}
+    rel = raw.get("relevance")
+    if rel is None:
+        rel = {}
+    elif not isinstance(rel, dict):
+        raise ConfigError("relevance 는 min_score/quotas/add 등을 가진 항목이어야 합니다.")
 
     raw_sources = raw.get("sources")
     if not raw_sources:
@@ -218,4 +258,12 @@ def load(path: str | Path) -> Config:
         digest=bool(telegram.get("digest", True)),
         delivery_times=_parse_delivery_times(telegram.get("delivery_times")),
         max_per_delivery=max(0, int(telegram.get("max_per_delivery", 0))),
+        relevance=bool(rel.get("enabled", True)),
+        relevance_min_score=int(rel.get("min_score", 4)),
+        relevance_quotas=_parse_quotas(rel.get("quotas")),
+        relevance_max_per_source=max(0, int(rel.get("max_per_source", 6))),
+        relevance_similar=min(1.0, max(0.1, float(rel.get("similar_threshold", 0.4)))),
+        relevance_add=[str(w) for w in rel.get("add") or []],
+        relevance_penalize=[str(w) for w in rel.get("penalize") or []],
+        group_by_topic=bool(telegram.get("group_by_topic", True)),
     )
