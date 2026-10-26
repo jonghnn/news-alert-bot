@@ -125,13 +125,17 @@ def _parse_delivery_times(raw: Any) -> list[tuple[int, int]]:
 def _parse_quotas(raw: Any) -> dict[str, int]:
     """주제별 할당. 비우면 relevance.py 의 기본값을 쓴다.
 
-    왜 필요한가 (실측 2026-10-26): 점수순으로만 20건을 뽑으면 코인 기사가 7건을
-    차지했고 그중 3건이 "오늘 코인 하락" 을 다른 말로 반복했다. 코인 시세 기사는
-    자극적인 단어(급락·청산·폭락)가 많아 점수가 구조적으로 높다.
+    왜 필요한가 (실측 2026-10-26): 활용 사례 기사는 +3~+6 점인데 엔비디아 산업
+    기사는 +9~+18 점이다. 점수만으로 줄 세우면 활용 사례가 한 건도 안 들어온다.
+    할당은 가중치 조정보다 확실하다 — 자리를 숫자로 보장한다.
     """
-    from .relevance import TOPIC_AI, TOPIC_COIN, TOPIC_MARKET, TOPIC_OTHER
+    from .relevance import (
+        TOPIC_COIN, TOPIC_INDUSTRY, TOPIC_MARKET, TOPIC_OTHER, TOPIC_USECASE,
+    )
 
-    default = {TOPIC_AI: 7, TOPIC_MARKET: 7, TOPIC_COIN: 5, TOPIC_OTHER: 1}
+    default = {
+        TOPIC_USECASE: 7, TOPIC_INDUSTRY: 6, TOPIC_MARKET: 5, TOPIC_COIN: 2, TOPIC_OTHER: 1,
+    }
     if not raw:
         return default
     if not isinstance(raw, dict):

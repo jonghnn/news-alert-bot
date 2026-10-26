@@ -133,7 +133,9 @@ def _format(source_name: str, source_type: str, entry: Entry, tz) -> str:
     return "\n".join(lines)
 
 
-TOPIC_ICONS = {"AI·반도체": "🤖", "주식·거시": "📈", "코인": "🪙", "기타": "🔔"}
+TOPIC_ICONS = {
+    "AI 활용·사례": "🛠️", "AI·반도체 산업": "🤖", "주식·거시": "📈", "코인": "🪙", "기타": "🔔",
+}
 
 
 def _topic_lines(topic_name: str, rows) -> list[str]:
