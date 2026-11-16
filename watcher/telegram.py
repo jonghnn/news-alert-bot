@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -36,7 +37,7 @@ class Telegram:
             raise TelegramError(f"{method} 실패: {body.get('description') or response.text[:200]}")
         return body["result"]
 
-    def send(self, text: str, silent: bool = False) -> None:
+    def send(self, text: str, silent: bool = False, preview: bool = True) -> None:
         if self.dry_run:
             log.info("[전송 안 함] %s", text.replace("\n", " | ")[:200])
             return
@@ -52,7 +53,9 @@ class Telegram:
                 "chat_id": self.chat_id,
                 "text": text[:MAX_LEN],
                 "parse_mode": "HTML",
-                "disable_web_page_preview": False,
+                # 링크가 여러 개인 묶음 메시지는 미리보기를 끈다. 켜 두면 첫 기사
+                # 썸네일 카드가 메시지 밑에 크게 붙어 목록을 가린다.
+                "disable_web_page_preview": not preview,
                 "disable_notification": silent,
             },
         )
@@ -71,22 +74,33 @@ class Telegram:
         와 '기술 이슈' 로 흩어져 보였다. 읽는 쪽에서 의미가 있는 묶음은 주제다.
         """
         total = len(pending)
-        blocks = [[f"📬 <b>새 소식 {total}건</b>"]]
 
         if by_topic:
-            grouped_topic: dict[str, list] = {}
-            for source, entry in pending:
-                grouped_topic.setdefault(entry.topic or "기타", []).append((source, entry))
-            # pending 은 이미 주제 순서로 정렬돼 있다 (relevance.select).
-            for name, rows in grouped_topic.items():
-                blocks.append(_topic_lines(name, rows))
-            return self._send_blocks(blocks, silent)
+            rows = [
+                {"topic": entry.topic or "기타", "title": entry.title, "link": entry.link, "badge": entry.badge}
+                for _, entry in pending
+            ]
+            return self.send_rows(rows, silent)
 
+        blocks = [[f"📬 <b>새 소식 {total}건</b>"]]
         grouped: dict[tuple[str, str], list] = {}
         for source, entry in pending:
             grouped.setdefault((source.name, source.type), []).append(entry)
         for (name, stype), entries in grouped.items():
             blocks.append(_digest_lines(name, stype, entries, tz))
+        return self._send_blocks(blocks, silent)
+
+    def send_rows(self, rows: list[dict], silent: bool) -> int:
+        """주제별 제목 목록. Claude 브리핑이 안 왔을 때 대신 나가는 형식이다.
+
+        rows: {"topic", "title", "link", "badge"} — picks.json 항목과 같은 모양.
+        """
+        blocks = [[f"📬 <b>새 소식 {len(rows)}건</b>"]]
+        grouped: dict[str, list] = {}
+        for row in rows:
+            grouped.setdefault(row.get("topic") or "기타", []).append(row)
+        for name, items in grouped.items():  # 이미 주제 순서로 정렬돼 있다 (relevance.select)
+            blocks.append(_topic_lines(name, items))
         return self._send_blocks(blocks, silent)
 
     def _send_blocks(self, blocks, silent: bool) -> int:
@@ -104,7 +118,7 @@ class Telegram:
             messages.append("\n\n".join(buf))
 
         for text in messages:
-            self.send(text, silent=silent)
+            self.send(text, silent=silent, preview=False)
         return len(messages)
 
     def get_updates(self) -> list[dict]:
@@ -138,15 +152,33 @@ TOPIC_ICONS = {
 }
 
 
+TITLE_MAX = 45  # 한 줄에 들어가는 정도. 넘으면 자른다 (모바일에서 3줄씩 접히던 것)
+
+
 def _topic_lines(topic_name: str, rows) -> list[str]:
-    """주제 묶음 한 덩어리. 줄 끝에 소스를 작게 붙여 어디서 왔는지는 남긴다."""
+    """주제 묶음 한 덩어리.
+
+    가독성 (2026-11-16 "가독성이 너무 없음"): 예전에는 줄마다 제목 + 배지 +
+    소스명(<i>AI 뉴스</i>)이 붙어 20줄이 한 덩어리로 보였다. 소스명은 읽는
+    쪽에 쓸모가 없어 뺐고, 제목은 줄이고, 묶음 사이를 띄운다.
+    """
     icon = TOPIC_ICONS.get(topic_name, "🔔")
-    lines = [f"{icon} <b>{_text(topic_name)}</b> ({len(rows)})"]
-    for source, entry in rows:
-        badge = f" {_text(entry.badge.split()[0])}" if entry.badge else ""
-        link = f'<a href="{html.escape(entry.link, quote=True)}">{_text(entry.title)}</a>'
-        lines.append(f"· {link}{badge} <i>{_text(source.name)}</i>")
+    lines = [f"{icon} <b>{_text(topic_name)}</b>"]
+    for row in rows:
+        title = _short(_clean_title(row["title"]))
+        lines.append(f'· <a href="{html.escape(row["link"], quote=True)}">{_text(title)}</a>')
     return lines
+
+
+def _clean_title(title: str) -> str:
+    """구글 뉴스 제목 끝의 ' - 언론사' 와 앞의 [말머리] 를 뗀다."""
+    title = re.sub(r"\s+-\s+[^-]{1,25}$", "", title.strip())
+    title = re.sub(r"^\s*\[[^\]]{1,20}\]\s*", "", title)
+    return title
+
+
+def _short(title: str) -> str:
+    return title if len(title) <= TITLE_MAX else title[: TITLE_MAX - 1].rstrip() + "…"
 
 
 def _digest_lines(source_name: str, source_type: str, entries, tz) -> list[str]:

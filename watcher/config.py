@@ -76,6 +76,8 @@ class Config:
     relevance_add: list[str]             # 점수를 올릴 단어 (+4)
     relevance_penalize: list[str]        # 점수를 내릴 단어 (-5)
     group_by_topic: bool                 # 메시지를 소스별 대신 주제별로 묶는다
+    claude_wait_minutes: int             # 전송 시각 뒤 이만큼은 Claude 루틴 차례로 비워 둔다 (0 = 안 기다림)
+    fallback_max: int                    # Claude 대신 봇이 직접 보낼 때 최대 건수
 
 
 def _slug(name: str) -> str:
@@ -270,4 +272,6 @@ def load(path: str | Path) -> Config:
         relevance_add=[str(w) for w in rel.get("add") or []],
         relevance_penalize=[str(w) for w in rel.get("penalize") or []],
         group_by_topic=bool(telegram.get("group_by_topic", True)),
+        claude_wait_minutes=max(0, int(telegram.get("claude_wait_minutes", 0))),
+        fallback_max=max(1, int(telegram.get("fallback_max", 12))),
     )

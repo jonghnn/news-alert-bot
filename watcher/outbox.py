@@ -93,11 +93,11 @@ def flush(telegram, state_path: str | Path, silent: bool) -> int:
         # 한 건이 실패해도 나머지는 계속 보낸다. 예전에는 맨 앞 파일 하나가
         # 깨지면 뒤의 29건이 11일 동안 한 번도 시도되지 않았다.
         try:
-            telegram.send(_sanitize(text)[:MAX_MESSAGE_CHARS], silent=silent)
+            telegram.send(_sanitize(text)[:MAX_MESSAGE_CHARS], silent=silent, preview=False)
         except TelegramError as error:
             log.warning("브리핑 전송 실패, 태그를 떼고 재시도합니다 %s: %s", item.name, error)
             try:
-                telegram.send(_strip_tags(text)[:MAX_MESSAGE_CHARS], silent=silent)
+                telegram.send(_strip_tags(text)[:MAX_MESSAGE_CHARS], silent=silent, preview=False)
             except TelegramError as retry_error:
                 log.error("브리핑을 보내지 못했습니다 %s: %s", item.name, retry_error)
                 _quarantine(item, telegram)  # 큐를 막지 않도록 옆으로 치운다

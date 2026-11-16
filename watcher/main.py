@@ -4,14 +4,17 @@
   python -m watcher.main --dry-run    # 보낼 내용만 로그로 확인, 실제 전송 안 함
   python -m watcher.main --mode test  # 연결 확인용 테스트 메시지 1건
   python -m watcher.main --mode chatid  # 내 chat_id 확인
+  python -m watcher.main --mode pick    # 고르기만 해서 state/picks.json 에 쓴다 (Claude 루틴용, 토큰 불필요)
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 from datetime import datetime, time as clock, timedelta, timezone
+from pathlib import Path
 
 from . import config as config_module
 from . import outbox
@@ -50,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if args.mode == "pick":
+        return _pick(args, http.make_session())
     if not token:
         log.error("TELEGRAM_BOT_TOKEN 이 없습니다. GitHub 저장소 Settings → Secrets 에 등록해 주세요.")
         return 1
@@ -78,10 +83,25 @@ def main(argv: list[str] | None = None) -> int:
 
     tz = _timezone(cfg.timezone)
     state = State(args.state)
+    silent = _in_quiet_hours(cfg.quiet_hours, tz)
+
+    # 1) Claude 루틴이 써 둔 브리핑부터 내보낸다.
+    #    ⚠️ 전송 시각 검사보다 **먼저** 해야 한다. 예전에는 검사 뒤에 있어서,
+    #    브리핑 push 로 깨어난 실행이 "전송 시각이 아닙니다" 로 그냥 끝났다.
+    #    실측: 11/15 18:13 브리핑이 23:21 에야 나갔다 (5시간 지연).
+    sent_total = 0
+    try:
+        sent_total += outbox.flush(telegram, args.state, silent)
+    except Exception as error:
+        log.error("브리핑 전송 실패: %s", error)
+
+    # 2) 루틴이 골라만 두고 브리핑을 못 쓴 채 오래 지났으면 제목 목록으로 대신 보낸다.
+    sent_total += _flush_stale_picks(cfg, telegram, args.state, silent)
 
     # 전송 시각이 아니면 수집조차 하지 않는다. 수집만 하고 안 보내면 이슈 전개
     # 기록이 갱신되면서 '무엇이 새로 붙었는지' 가 영구히 사라진다.
-    if not args.now and _delivery_slot(cfg.delivery_times, tz, state) is None:
+    slot = _delivery_slot(cfg.delivery_times, tz, state)
+    if not args.now and slot is None:
         log.info(
             "지금은 전송 시각이 아닙니다. 다음 전송 예정: %s (설정: %s)",
             _next_slot_text(cfg.delivery_times, tz),
@@ -89,47 +109,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    state.prune({source.key for source in cfg.sources})
-    silent = _in_quiet_hours(cfg.quiet_hours, tz)
+    # 3) 전송 시각 직후는 Claude 루틴 차례다. 루틴이 고르고 한 줄 요약을 써서
+    #    보낸다. 이만큼 지나도 루틴이 안 왔을 때만 봇이 제목 목록으로 대신 보낸다.
+    if not args.now and cfg.claude_wait_minutes:
+        deadline = slot + timedelta(minutes=cfg.claude_wait_minutes)
+        if datetime.now(tz) < deadline:
+            log.info(
+                "Claude 루틴 차례입니다. %s 까지 안 오면 제목 목록으로 대신 보냅니다.",
+                deadline.strftime("%H:%M"),
+            )
+            return 0
+        log.warning("Claude 루틴이 %s 차례를 쓰지 않았습니다 — 제목 목록으로 대신 보냅니다.",
+                    slot.strftime("%H:%M"))
 
-    # 루틴이 써 둔 요약 브리핑을 먼저 내보낸다.
-    sent_total = 0
+    state.prune({source.key for source in cfg.sources})
+
+    pending: list[tuple] = []
     failed: list[str] = []
     try:
-        sent_total += outbox.flush(telegram, args.state, silent)
-    except Exception as error:
-        log.error("브리핑 전송 실패: %s", error)
-
-    # 소스별로 바로 보내지 않고 모았다가 한 번에 보낸다 (묶음 전송).
-    pending: list[tuple] = []
-    try:
-        for source in cfg.sources:
-            try:
-                pending += [(source, entry) for entry in _collect(source, cfg, session, state)]
-                state.set_meta(source.key, "failures", 0)
-            except SkipSource as reason:
-                # 설정이 덜 된 것은 고장이 아니므로 실패로 세지 않는다.
-                log.warning("[%s] 건너뜀 — %s", source.name, reason)
-            except Exception as error:  # 한 소스가 죽어도 나머지는 계속 돌아야 한다.
-                failed.append(source.name)
-                log.error("[%s] 실패: %s", source.name, error)
-                _maybe_alert(source, telegram, state, error)
-
-        if pending and cfg.relevance:
-            before = len(pending)
-            pending, dropped, by_topic = relevance.select(pending, cfg)
-            for source, entry in dropped:
-                _remember(state, source.key, entry)
-            log.info(
-                "관련성 점수로 %d건 중 %d건을 골랐습니다 (%d점 미만·중복·할당 초과 %d건 버림)",
-                before, len(pending), cfg.relevance_min_score, len(dropped),
-            )
-            if by_topic:
-                log.info("주제별: %s", ", ".join(f"{k} {v}건" for k, v in by_topic.items()))
-        elif pending and cfg.max_per_delivery:
-            pending, dropped = _trim(pending, cfg.max_per_delivery, state)
-            if dropped:
-                log.info("전체 상한을 넘겨 %d건을 버립니다 (한 번에 최대 %d건)", dropped, cfg.max_per_delivery)
+        pending = _gather(cfg, session, state, telegram, failed)
+        if pending and cfg.relevance and cfg.claude_wait_minutes:
+            # 대신 보내는 목록은 짧게. 주제를 번갈아 뽑아 한 주제가 독차지하지 않게 한다.
+            pending = _cap_by_topic(pending, cfg.fallback_max, state)
 
         if pending:
             sent_total += _deliver(pending, cfg, telegram, state, tz, silent, args.state)
@@ -145,6 +146,156 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("실패한 소스: %s", ", ".join(failed))
 
     return 1 if len(failed) == len(cfg.sources) else 0
+
+
+def _gather(cfg, session, state, telegram, failed: list) -> list:
+    """모든 소스에서 모으고 관련성 점수로 고른다. 전송은 하지 않는다."""
+    pending: list[tuple] = []
+    for source in cfg.sources:
+        try:
+            pending += [(source, entry) for entry in _collect(source, cfg, session, state)]
+            state.set_meta(source.key, "failures", 0)
+        except SkipSource as reason:
+            # 설정이 덜 된 것은 고장이 아니므로 실패로 세지 않는다.
+            log.warning("[%s] 건너뜀 — %s", source.name, reason)
+        except Exception as error:  # 한 소스가 죽어도 나머지는 계속 돌아야 한다.
+            failed.append(source.name)
+            log.error("[%s] 실패: %s", source.name, error)
+            _maybe_alert(source, telegram, state, error)
+
+    if pending and cfg.relevance:
+        before = len(pending)
+        pending, dropped, by_topic = relevance.select(pending, cfg)
+        for source, entry in dropped:
+            _remember(state, source.key, entry)
+        log.info(
+            "관련성 점수로 %d건 중 %d건을 골랐습니다 (%d점 미만·중복·할당 초과 %d건 버림)",
+            before, len(pending), cfg.relevance_min_score, len(dropped),
+        )
+        if by_topic:
+            log.info("주제별: %s", ", ".join(f"{k} {v}건" for k, v in by_topic.items()))
+    elif pending and cfg.max_per_delivery:
+        pending, dropped = _trim(pending, cfg.max_per_delivery, state)
+        if dropped:
+            log.info("전체 상한을 넘겨 %d건을 버립니다 (한 번에 최대 %d건)", dropped, cfg.max_per_delivery)
+    return pending
+
+
+def _cap_by_topic(pending, cap: int, state) -> list:
+    """주제를 번갈아 돌며 cap 건까지 남긴다. 순서(주제 순 → 점수 순)는 유지한다."""
+    if len(pending) <= cap:
+        return pending
+    queues: dict[str, list[int]] = {}
+    for i, (_, entry) in enumerate(pending):
+        queues.setdefault(entry.topic or "기타", []).append(i)
+    keep: set[int] = set()
+    while len(keep) < cap and any(queues.values()):
+        for q in queues.values():
+            if q and len(keep) < cap:
+                keep.add(q.pop(0))
+    for i, (source, entry) in enumerate(pending):
+        if i not in keep:
+            _remember(state, source.key, entry)
+    return [pair for i, pair in enumerate(pending) if i in keep]
+
+
+def _picks_path(state_path) -> Path:
+    return Path(state_path).parent / "picks.json"
+
+
+def _pick(args, session) -> int:
+    """고르기만 한다 — Claude 루틴이 부른다. 텔레그램 토큰 없이 돈다.
+
+    고른 기사는 state/picks.json 에 쓰고, 루틴이 그걸 읽어 한 줄 요약
+    브리핑을 state/outbox/ 에 쓴다. 전송은 여전히 Actions 가 한다
+    (토큰은 GitHub Secrets 에만 있다).
+    """
+    try:
+        cfg = config_module.load(args.config)
+    except config_module.ConfigError as error:
+        log.error("설정 오류: %s", error)
+        return 1
+    tz = _timezone(cfg.timezone)
+    state = State(args.state)
+    state.prune({source.key for source in cfg.sources})
+    # 실패 알림은 보낼 수단이 없으니 로그로만 남긴다.
+    quiet = Telegram(session, "", "", dry_run=True)
+
+    failed: list[str] = []
+    pending = _gather(cfg, session, state, quiet, failed)
+
+    path = _picks_path(args.state)
+    items = []
+    if path.exists():  # 앞 차례 것이 아직 안 나갔으면 이어 붙인다 (버리지 않는다)
+        try:
+            items = json.loads(path.read_text(encoding="utf-8")).get("items", [])
+        except (OSError, ValueError):
+            items = []
+    for source, entry in pending:
+        items.append({
+            "topic": entry.topic or "기타",
+            "title": entry.title,
+            "link": entry.link,
+            "badge": entry.badge,
+            "source": source.name,
+        })
+        if not args.dry_run:
+            _remember(state, source.key, entry)
+            outbox.log_sent(args.state, source.name, source.type, entry)
+
+    if items:
+        path.write_text(
+            json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "items": items},
+                       ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8",
+        )
+    if not args.dry_run:
+        # 이 차례를 썼다고 기록한다. Actions 가 같은 차례를 또 보내지 않게.
+        state.set_global("last_delivery", _claim_slot(cfg.delivery_times, tz).isoformat(timespec="seconds"))
+        state.save()
+        outbox.prune_log(args.state)
+
+    log.info("고름: %d건 → %s", len(items), path if items else "(없음 — picks.json 안 만듦)")
+    if failed:
+        log.warning("실패한 소스: %s", ", ".join(failed))
+    return 1 if len(failed) == len(cfg.sources) else 0
+
+
+def _claim_slot(times, tz) -> datetime:
+    """루틴이 쓴 차례. 전송 시각 60분 전 안쪽이면 그 시각을 쓴 것으로 친다.
+
+    루틴은 08:12 에 깨어나는데 전송 시각은 08:30 이다. 그냥 '지금' 을 기록하면
+    08:30 이 지난 뒤 Actions 가 '아직 안 보냈다' 고 보고 한 번 더 보낸다.
+    """
+    now = datetime.now(tz)
+    for day in (0, 1):
+        for h, m in times:
+            slot = datetime.combine(now.date() + timedelta(days=day), clock(h, m), tzinfo=tz)
+            if now < slot <= now + timedelta(minutes=60):
+                return slot
+    return now
+
+
+def _flush_stale_picks(cfg, telegram, state_path, silent: bool) -> int:
+    """루틴이 picks.json 만 남기고 브리핑을 못 썼으면 봇이 제목 목록으로 보낸다."""
+    path = _picks_path(state_path)
+    if not path.exists():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        at = datetime.fromisoformat(data["at"])
+    except (OSError, ValueError, KeyError) as error:
+        log.warning("picks.json 을 읽지 못했습니다: %s", error)
+        return 0
+    if datetime.now(timezone.utc) - at < timedelta(minutes=cfg.claude_wait_minutes):
+        return 0
+    items = (data.get("items") or [])[: cfg.fallback_max]
+    if items:
+        log.warning("Claude 가 브리핑을 안 썼습니다 — 고른 %d건을 제목 목록으로 보냅니다.", len(items))
+        telegram.send_rows(items, silent)
+    if not telegram.dry_run:
+        path.unlink(missing_ok=True)
+    return len(items)
 
 
 def _collect(source, cfg, session, state) -> list:
@@ -392,7 +543,7 @@ def _parse_args(argv):
     parser = argparse.ArgumentParser(description="관심사 알림 봇")
     parser.add_argument("--config", default="config.yml")
     parser.add_argument("--state", default="state/seen.json")
-    parser.add_argument("--mode", choices=["run", "test", "chatid"], default="run")
+    parser.add_argument("--mode", choices=["run", "test", "chatid", "pick"], default="run")
     parser.add_argument("--dry-run", action="store_true", help="실제 전송 없이 결과만 로그로 출력")
     parser.add_argument("--now", action="store_true", help="전송 시각을 무시하고 지금 보낸다 (수동 실행용)")
     return parser.parse_args(argv)
