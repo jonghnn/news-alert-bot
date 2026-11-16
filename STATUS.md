@@ -647,7 +647,10 @@ Actions (예비): 전송 시각 + claude_wait_minutes(90분) 안에는 기다린
 
 ### 남은 한계
 
-- 루틴이 클라우드에서 구글 뉴스에 접속 가능한지는 첫 실행으로 확인 (아래 검증 기록 참조).
+- **⚠️ 첫 실행(11/16 04:16 UTC) 결과: 클라우드 기본 환경(Default, network limited)이 news.google.com 을 막는다**
+  (`Tunnel connection failed: 403 Forbidden`). 루틴이 스스로 환경을 만들려다 권한 확인에서 멈췄다.
+  해결: news.google.com · news.hada.io 만 허용한 환경을 만들어 루틴의 environment_id 를 바꿔야 한다 (사용자 승인 필요).
+  그 전까지는 봇이 20:30 / 10:00 에 제목 목록으로 대신 보낸다 — 알림은 끊기지 않는다.
 - 루틴 실패 시 실패 알림(`_maybe_alert`)은 텔레그램으로 못 간다 — 로그에만 남는다.
 - 한 줄은 **제목만** 보고 쓴다. "뭘 만들었는지" 의 본문 내용은 여전히 없다.
 
