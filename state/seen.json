@@ -1,12 +1,12 @@
 {
   "meta": {
-    "last_delivery": "2026-11-21T19:14:21+09:00"
+    "last_delivery": "2026-11-22T08:30:00+09:00"
   },
   "sources": {
     "issue:경제-이슈": {
       "initialized": true,
       "meta": {
-        "failures": 11,
+        "failures": 12,
         "issues": {
           "i:003f5a8eb41153c8": {
             "last_seen": "2026-11-14T02:43:56+00:00",
@@ -11566,7 +11566,7 @@
     "issue:기술-이슈": {
       "initialized": true,
       "meta": {
-        "failures": 11,
+        "failures": 12,
         "issues": {
           "i:003f5a8eb41153c8": {
             "last_seen": "2026-11-14T02:43:56+00:00",
@@ -15575,7 +15575,7 @@
     "issue:세계-이슈": {
       "initialized": true,
       "meta": {
-        "failures": 11,
+        "failures": 12,
         "issues": {
           "i:003f5a8eb41153c8": {
             "last_seen": "2026-11-14T16:03:23+00:00",
@@ -18951,7 +18951,7 @@
     "news:ai-뉴스": {
       "initialized": true,
       "meta": {
-        "failures": 11
+        "failures": 12
       },
       "seen": {
         "0008bdff5e3ef2db": "2026-11-03T16:07:28+00:00",
@@ -27151,7 +27151,7 @@
     "news:코인-뉴스": {
       "initialized": true,
       "meta": {
-        "failures": 11
+        "failures": 12
       },
       "seen": {
         "002851c01b5dc6c4": "2026-10-27T14:22:07+00:00",
@@ -33981,7 +33981,7 @@
     "site:geeknews": {
       "initialized": true,
       "meta": {
-        "failures": 11,
+        "failures": 12,
         "feed_url": "https://news.hada.io/rss/news"
       },
       "seen": {
